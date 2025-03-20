@@ -1,22 +1,29 @@
+#ifndef NETWORK_HPP
+#define NETWORK_HPP
+
 #include <print>
 #include <unordered_map>
 #include <vector>
 #include <random>
 #include <set>
-#include <numeric> // For calculating averages
+#include <numeric>
+#include <algorithm>
+#include <climits>
 
 class Network {
 private:
-    std::unordered_map<int, std::unordered_map<int, int>> connections; // {peer_id -> {connected_peer -> delay}}
-    std::unordered_map<int, int> connection_count; // {peer_id -> current connection count}
+    // Maps each peer to its connected peers and their delay.
+    std::unordered_map<int, std::unordered_map<int, int>> connections;
+    // Tracks the current connection count for each peer.
+    std::unordered_map<int, int> connection_count;
 
 public:
-    // Add a connection between two peers with a delay
+    // Add a connection between two peers with a delay.
+    // Returns false if either peer reached max_connections.
     bool add_connection(int peer1, int peer2, int delay, int max_connections) {
         if (connection_count[peer1] >= max_connections || connection_count[peer2] >= max_connections) {
-            return false; // Peer reached max connections
+            return false;
         }
-
         connections[peer1][peer2] = delay;
         connections[peer2][peer1] = delay;
         connection_count[peer1]++;
@@ -24,15 +31,20 @@ public:
         return true;
     }
 
-    // Generate a network with configurable connectivity
+    // Generate a network with configurable connectivity.
+    // full_mesh: every peer connects to every other.
+    // Otherwise, each peer gets a random number (between min_connections and max_connections)
+    // of connections, but no peer exceeds max_connections.
     void generate_network(int num_peers, bool full_mesh, int min_connections, int max_connections) {
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::normal_distribution<double> delay_distribution(100.0, 50.0); // Mean = 100ms, StdDev = 50ms
+        std::normal_distribution<double> delay_distribution(100.0, 50.0); // Mean=100ms, StdDev=50ms
         std::uniform_int_distribution<int> connection_distribution(min_connections, max_connections);
 
         for (int i = 1; i <= num_peers; ++i) {
-            std::set<int> connected_peers; // Ensures unique connections
+            // Ensure the peer exists in connection_count.
+            connection_count[i] = connection_count[i];
+            std::set<int> connected_peers; // To ensure uniqueness.
 
             if (full_mesh) {
                 for (int j = i + 1; j <= num_peers; ++j) {
@@ -40,52 +52,123 @@ public:
                     add_connection(i, j, delay, max_connections);
                 }
             } else {
-                int num_connections = connection_distribution(gen); // Random connections count
-                
-                while (connected_peers.size() < static_cast<size_t>(num_connections)) {
-                    int peer = std::uniform_int_distribution<int>(1, num_peers)(gen);
-
-                    // Ensure unique, valid peer and check max connections
-                    if (peer != i && connected_peers.find(peer) == connected_peers.end() &&
-                        connection_count[i] < max_connections && connection_count[peer] < max_connections) {
-                        
+                int target_connections = connection_distribution(gen);
+                int attempts = 0;
+                const int max_attempts = 1000;
+                while (connected_peers.size() < static_cast<size_t>(target_connections) && attempts < max_attempts) {
+                    int candidate = std::uniform_int_distribution<int>(1, num_peers)(gen);
+                    // Ensure candidate is different, not already connected, and neither peer is full.
+                    if (candidate != i && connected_peers.find(candidate) == connected_peers.end() &&
+                        connection_count[i] < max_connections && connection_count[candidate] < max_connections) {
                         int delay = std::clamp(static_cast<int>(delay_distribution(gen)), 10, 500);
-                        if (add_connection(i, peer, delay, max_connections)) {
-                            connected_peers.insert(peer);
+                        if (add_connection(i, candidate, delay, max_connections)) {
+                            connected_peers.insert(candidate);
                         }
                     }
+                    attempts++;
                 }
             }
         }
     }
 
-    // Print each node and its number of connections
+    // Print a compact summary of overall connection statistics.
     void print_connections_count() const {
-        std::vector<std::pair<int, int>> connection_data;
+        int totalPeers = 0;
+        int totalConnections = 0;
+        int minConn = INT_MAX;
+        int maxConn = 0;
         for (const auto& [peer, peers] : connections) {
-            connection_data.emplace_back(peer, static_cast<int>(peers.size()));
+            int count = static_cast<int>(peers.size());
+            totalPeers++;
+            totalConnections += count;
+            minConn = std::min(minConn, count);
+            maxConn = std::max(maxConn, count);
         }
-
-        std::print("Connections per peer:\n");
-        for (const auto& [peer, count] : connection_data) {
-            std::print("Peer {}: {} connections\n", peer, count);
-        }
-        std::print("-----------------------\n");
+        double avgConn = (totalPeers > 0) ? static_cast<double>(totalConnections) / totalPeers : 0;
+        std::print("Summary: Peers: {} | Total edges (dup): {} | Avg: {:.2f} | Min: {} | Max: {}\n",
+                   totalPeers, totalConnections, avgConn, minConn, maxConn);
     }
 
-    // Print each peer and its average delay
+    // Print a compact summary of delay statistics across all edges.
     void print_average_delay() const {
-        std::print("Average delay per peer:\n");
+        int totalDelay = 0;
+        int count = 0;
+        int minDelay = INT_MAX;
+        int maxDelay = 0;
         for (const auto& [peer, peers] : connections) {
-            if (!peers.empty()) {
-                int total_delay = std::accumulate(peers.begin(), peers.end(), 0,
-                                                  [](int sum, const auto& p) { return sum + p.second; });
-                double avg_delay = static_cast<double>(total_delay) / peers.size();
-                std::print("Peer {}: {:.2f} ms\n", peer, avg_delay);
-            } else {
-                std::print("Peer {}: No connections\n", peer);
+            for (const auto& [other, delay] : peers) {
+                totalDelay += delay;
+                count++;
+                minDelay = std::min(minDelay, delay);
+                maxDelay = std::max(maxDelay, delay);
             }
         }
-        std::print("-----------------------\n");
+        double avgDelay = (count > 0) ? static_cast<double>(totalDelay) / count : 0;
+        std::print("Delays (ms) -> Avg: {:.2f} | Min: {} | Max: {} ({} edges)\n",
+                   avgDelay, minDelay, maxDelay, count);
+    }
+
+    // Print a single matrix summarizing each peer with columns:
+    // Connections, Average Delay, Minimum Delay, Maximum Delay.
+    void print_peer_summary_matrix() const {
+        std::vector<int> peers;
+        for (const auto& p : connection_count) {
+            peers.push_back(p.first);
+        }
+        std::sort(peers.begin(), peers.end());
+        std::print("\nPeer Summary Matrix:\n");
+        std::print("{:<6} {:<12} {:<12} {:<12} {:<12}\n", "Peer", "Connections", "Avg Delay", "Min Delay", "Max Delay");
+        for (int peer : peers) {
+            int conn = 0;
+            int sumDelay = 0;
+            int minDelay = INT_MAX;
+            int maxDelay = 0;
+            auto it = connections.find(peer);
+            if (it != connections.end() && !it->second.empty()) {
+                conn = static_cast<int>(it->second.size());
+                for (const auto& [other, delay] : it->second) {
+                    sumDelay += delay;
+                    minDelay = std::min(minDelay, delay);
+                    maxDelay = std::max(maxDelay, delay);
+                }
+            } else {
+                conn = 0;
+                minDelay = 0;
+                maxDelay = 0;
+            }
+            double avgDelay = (conn > 0) ? static_cast<double>(sumDelay) / conn : 0.0;
+            std::print("{:<6} {:<12} {:<12.2f} {:<12} {:<12}\n", peer, conn, avgDelay, minDelay, maxDelay);
+        }
+    }
+
+    // Print a peer x peer connectivity matrix (1 if connected, 0 otherwise).
+    void print_peer_connectivity_matrix() const {
+        std::vector<int> peers;
+        for (const auto& p : connection_count) {
+            peers.push_back(p.first);
+        }
+        std::sort(peers.begin(), peers.end());
+        std::print("\nPeer Connectivity Matrix:\n");
+        // Header row
+        std::print("{:<6}", "");
+        for (int peer : peers) {
+            std::print("{:<3}", peer);
+        }
+        std::print("\n");
+        // Each row: first column is peer ID, then connectivity values.
+        for (int i : peers) {
+            std::print("{:<6}", i);
+            for (int j : peers) {
+                int value = 0;
+                auto it = connections.find(i);
+                if (it != connections.end() && it->second.find(j) != it->second.end()) {
+                    value = 1;
+                }
+                std::print("{:<3}", value);
+            }
+            std::print("\n");
+        }
     }
 };
+
+#endif // NETWORK_HPP

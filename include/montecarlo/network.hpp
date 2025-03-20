@@ -19,8 +19,11 @@ private:
 
 public:
     // Add a connection between two peers with a delay.
-    // Returns false if either peer reached max_connections.
+    // Returns false if either peer reached max_connections or the connection already exists.
     bool add_connection(int peer1, int peer2, int delay, int max_connections) {
+        // Avoid duplicate connection if already exists.
+        if (connections[peer1].find(peer2) != connections[peer1].end())
+            return false;
         if (connection_count[peer1] >= max_connections || connection_count[peer2] >= max_connections) {
             return false;
         }
@@ -43,23 +46,31 @@ public:
 
         for (int i = 1; i <= num_peers; ++i) {
             // Ensure the peer exists in connection_count.
-            connection_count[i] = connection_count[i];
+            connection_count[i] = connection_count[i]; // default 0 if not exists.
             std::set<int> connected_peers; // To ensure uniqueness.
 
             if (full_mesh) {
+                // For full mesh, add connection only when i < j.
                 for (int j = i + 1; j <= num_peers; ++j) {
                     int delay = std::clamp(static_cast<int>(delay_distribution(gen)), 10, 500);
                     add_connection(i, j, delay, max_connections);
                 }
             } else {
+                // Draw a random target for connections and clamp it to max_connections.
                 int target_connections = connection_distribution(gen);
+                target_connections = std::min(target_connections, max_connections);
                 int attempts = 0;
                 const int max_attempts = 1000;
-                while (connected_peers.size() < static_cast<size_t>(target_connections) && attempts < max_attempts) {
+                // Exit if i already has reached max_connections.
+                while (connected_peers.size() < static_cast<size_t>(target_connections) &&
+                       connection_count[i] < max_connections &&
+                       attempts < max_attempts) {
                     int candidate = std::uniform_int_distribution<int>(1, num_peers)(gen);
-                    // Ensure candidate is different, not already connected, and neither peer is full.
-                    if (candidate != i && connected_peers.find(candidate) == connected_peers.end() &&
-                        connection_count[i] < max_connections && connection_count[candidate] < max_connections) {
+                    // Check: not self, not already connected (in current or previous iterations), and candidate has capacity.
+                    if (candidate != i &&
+                        connected_peers.find(candidate) == connected_peers.end() &&
+                        connections[i].find(candidate) == connections[i].end() &&
+                        connection_count[candidate] < max_connections) {
                         int delay = std::clamp(static_cast<int>(delay_distribution(gen)), 10, 500);
                         if (add_connection(i, candidate, delay, max_connections)) {
                             connected_peers.insert(candidate);

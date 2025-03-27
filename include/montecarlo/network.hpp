@@ -19,41 +19,8 @@
 This file defines the core data structures and simulation logic for a
 peer-to-peer network. The simulation models the propagation of unique
 transactions among network nodes (peers) connected by links with a fixed
-delay (ms). Key aspects of the design:
-
-1. **Transactions:**
-   - Each transaction is uniquely identified (by id) and has an associated
-     size in kilobytes.
-   
-2. **Connections:**
-   - Peers are connected via links modeled by the Connection struct, which
-     specifies a delay (in ms) for that connection.
-     
-3. **Propagation via DeliveryAttempts:**
-   - A transaction propagates through the network by "delivery attempts."
-   - Each delivery attempt (represented by a DeliveryAttempt) is from a sender
-     to a receiver and maintains its own timer (in ms). When the timer exceeds
-     the connection delay, the attempt may deliver the transaction.
-     
-4. **Global Pending Transactions:**
-   - The global_pending vector holds GlobalPendingTx objects. Each such object
-     represents a transaction in the process of propagating, its origin, a
-     list of delivery attempts still pending, and a set of nodes that already
-     know the transaction.
-     
-5. **Known Transactions:**
-   - The "known" map records, for each peer, the list of transactions that it
-     has received.
-     
-6. **Publishing:**
-   - Validators (selected among peers) are used to decide when to publish a
-     transaction. A random validator’s known list is used as the proposed set.
-   - If enough validators know a transaction (e.g. 100%), the transaction is
-     published, i.e. removed from the network (from every peer’s known list and
-     from global_pending). If not, forced publishing is triggered after a time
-     penalty.
-
-All simulation parameters are configurable via montecarlo.cpp.
+delay (ms). Key aspects include transaction propagation, delivery attempts,
+and publishing transactions based on validator consensus.
 */
 
 //////////////////////////
@@ -94,14 +61,11 @@ struct DeliveryAttempt {
 // attempts, and a set of node IDs that already know (received) the transaction.
 struct GlobalPendingTx {
     Transaction tx;                  // The transaction being propagated.
-    int origin;                      // The seed node that injected the transaction.
     std::vector<DeliveryAttempt> attempts; // Pending delivery attempts.
     std::set<int> delivered_to;      // Set of node IDs that already know the transaction.
     
-    GlobalPendingTx(const Transaction &t, int origin)
-      : tx(t), origin(origin) {
-        // The origin node always knows the transaction.
-        delivered_to.insert(origin);
+    GlobalPendingTx(const Transaction &t, int origin) : tx(t){
+        delivered_to.insert(origin);  // Still using the origin to initialize known_by.
     }
 };
 
@@ -111,21 +75,19 @@ struct GlobalPendingTx {
 
 class Network {
 private:
-    // 'connections' maps each peer ID to an unordered_map of neighbor IDs and the
-    // Connection objects (which contain the delay for that connection).
+    // Maps each peer ID to a map of neighbor IDs and the associated connection.
     std::unordered_map<int, std::unordered_map<int, Connection>> connections;
     
-    // 'connection_count' tracks how many connections each peer has.
+    // Tracks how many connections each peer has.
     std::unordered_map<int, int> connection_count;
     
-    // 'isValidator' maps each peer ID to a boolean indicating if the peer is a validator (true)
-    // or a seed node (false).
+    // Maps each peer ID to a boolean indicating if the peer is a validator.
     std::unordered_map<int, bool> isValidator;
     
-    // Global list of pending transactions that are currently propagating.
+    // Global list of pending transactions that are propagating.
     std::vector<GlobalPendingTx> global_pending;
     
-    // 'known' maps each peer ID to the list of transactions that the peer has received.
+    // Maps each peer ID to the list of transactions that the peer has received.
     std::unordered_map<int, std::vector<Transaction>> known;
     
     int next_tx_id = 1;  // Counter for assigning unique transaction IDs.
@@ -136,38 +98,17 @@ private:
     int total_injected = 0;        // Total number of transactions injected.
     int total_published_global = 0;  // Total number of transactions published.
     
-    //////////////////////////
-    // Helper Functions
-    //////////////////////////
-    
-    // Returns true if a transaction with a given ID exists in a vector.
-    bool transaction_exists_in(const std::vector<Transaction>& txs, int tx_id) const {
-        for (const auto &t : txs)
-            if (t.id == tx_id)
-                return true;
-        return false;
-    }
-    
-    // Checks if a peer already knows a transaction by looking in its 'known' list.
-    bool peer_knows_transaction(int peer, int tx_id) const {
-        auto it = known.find(peer);
-        if (it == known.end()) return false;
-        return transaction_exists_in(it->second, tx_id);
-    }
-    
 public:
     //////////////////////////
     // Public Methods
     //////////////////////////
     
-    // get_pending_count: Returns the number of pending transactions in the network.
-    // (Calculated as total transactions injected minus total transactions published.)
+    // Returns the number of pending transactions (injected minus published).
     int get_pending_count() const {
         return total_injected - total_published_global;
     }
     
-    // clean_network_txs: Resets the network state, clearing pending transactions, known lists,
-    // and all global counters.
+    // Resets the network state by clearing transactions, known lists, and counters.
     void clean_network_txs() {
         next_tx_id = 1;
         publish_attempt_counter = 0;
@@ -184,8 +125,8 @@ public:
     // Connection Generation
     //////////////////////////
     
-    // add_connection: Creates a connection between two peers with the specified delay.
-    // Returns false if the connection already exists or if either peer has reached max_connections.
+    // Creates a connection between two peers with the specified delay.
+    // Returns false if the connection exists or if either peer has reached max_connections.
     bool add_connection(int peer1, int peer2, int delay, int max_connections) {
         if (connections[peer1].find(peer2) != connections[peer1].end())
             return false;
@@ -198,33 +139,30 @@ public:
         return true;
     }
     
-    // generate_network: Constructs the network by initializing peers and creating connections.
-    // If full_mesh is true, every node is connected to every other node; otherwise, each node
-    // gets a random number of connections (within min_connections and max_connections).
+    // Constructs the network by initializing peers and creating connections.
+    // For full_mesh, every node is connected to every other; otherwise, connectivity is randomized.
     void generate_network(int num_peers, bool full_mesh, int min_connections, int max_connections) {
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::normal_distribution<double> delay_distribution(100.0, 50.0); // Delay distribution (mean=100ms, stddev=50ms)
+        std::normal_distribution<double> delay_distribution(100.0, 50.0); // Mean=100ms, stddev=50ms.
         std::uniform_int_distribution<int> connection_distribution(min_connections, max_connections);
         
-        // Initialize each peer's connection count, role, and known list.
+        // Initialize peers.
         for (int i = 1; i <= num_peers; ++i) {
             connection_count[i] = 0;
             isValidator[i] = false;
             known[i] = std::vector<Transaction>{};
         }
         
-        // Create connections between peers.
+        // Create connections.
         for (int i = 1; i <= num_peers; ++i) {
             std::set<int> connected_peers;
             if (full_mesh) {
-                // Full mesh: Connect every pair of nodes.
                 for (int j = i + 1; j <= num_peers; ++j) {
                     int delay = std::clamp(static_cast<int>(delay_distribution(gen)), 10, 500);
                     add_connection(i, j, delay, max_connections);
                 }
             } else {
-                // Partial connectivity: Each node gets a random number of connections.
                 int target_connections = connection_distribution(gen);
                 target_connections = std::min(target_connections, max_connections);
                 int attempts = 0;
@@ -251,7 +189,7 @@ public:
     // Transaction and Role Functions
     //////////////////////////
     
-    // select_validators: Randomly selects a subset of peers to act as validators.
+    // Randomly selects a subset of peers to act as validators.
     void select_validators(int num_validators) {
         std::vector<int> all_peers;
         for (const auto &p : connection_count)
@@ -261,17 +199,14 @@ public:
             isValidator[all_peers[i]] = true;
     }
     
-    // inject_transactions: Injects unique transactions into the network at seed nodes (non-validators).
-    // For each transaction:
-    //  - A GlobalPendingTx is created.
-    //  - A DeliveryAttempt is created for each neighbor of the selected seed.
-    //  - The transaction is added to the global pending list and to the seed's known list.
+    // Injects unique transactions at seed nodes (non-validators).
+    // For each transaction, creates delivery attempts to every neighbor of the seed.
     void inject_transactions(int num_transactions) {
         std::print("Injecting {} transactions.\n", num_transactions);
         total_injected += num_transactions;
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<int> size_distribution(1, 10); // Transaction size between 1 and 10 KB.
+        std::uniform_int_distribution<int> size_distribution(1, 5); // Transaction size between 1 and 10 KB.
         std::vector<int> seed_peers;
         // Seed nodes: non-validator nodes.
         for (const auto &p : isValidator)
@@ -284,6 +219,8 @@ public:
             Transaction tx(next_tx_id++, tx_size);
             int seed = seed_peers[peer_distribution(gen)];
             GlobalPendingTx gpt(tx, seed);
+            // Explicitly mark the seed as having received the transaction.
+            gpt.delivered_to.insert(seed);
             // Create a delivery attempt for every neighbor of the seed.
             for (const auto &nPair : connections[seed]) {
                 int neighbor = nPair.first;
@@ -295,23 +232,16 @@ public:
         }
     }
     
+    
     //////////////////////////
     // Broadcast Function
     //////////////////////////
     
-    // broadcast: Propagates transactions by processing the global_pending list.
-    // For each DeliveryAttempt:
-    //   - Increment the timer.
-    //   - If the timer reaches the connection delay (sender->receiver) and the sender’s bandwidth limit is not exceeded,
-    //     the transaction is delivered:
-    //       • The receiver is marked as having received the transaction (added to delivered_to).
-    //       • The receiver's known list is updated.
-    //       • Propagation: New DeliveryAttempts are created from the receiver to all its neighbors (except the sender)
-    //         that have not yet received the transaction.
-    // Attempts that remain incomplete are retained. GlobalPendingTx objects with no remaining attempts are removed.
+    // Propagates transactions by processing the global_pending list.
+    // Increments timers, delivers transactions when connection delays are met,
+    // and creates new delivery attempts from receivers to their neighbors.
     void broadcast(int ms, double bandwidth_kb_per_ms) {
-        double max_transmitted = bandwidth_kb_per_ms * ms; // Maximum KB each sender can transmit in this call.
-        // 'transmitted' tracks the total KB transmitted by each sender during this broadcast.
+        double max_transmitted = bandwidth_kb_per_ms * ms; // Maximum KB each sender can transmit.
         std::unordered_map<int, double> transmitted;
         for (const auto &p : connections)
             transmitted[p.first] = 0.0;
@@ -319,26 +249,18 @@ public:
         std::vector<GlobalPendingTx> newGlobal;
         for (auto &gpt : global_pending) {
             std::vector<DeliveryAttempt> newAttempts;
-            // Process each delivery attempt for the transaction.
             for (auto &attempt : gpt.attempts) {
-                attempt.timer += ms; // Increment the timer for this attempt.
-                // If the receiver already knows the transaction, skip this attempt.
+                attempt.timer += ms;
                 if (gpt.delivered_to.find(attempt.receiver) != gpt.delivered_to.end())
                     continue;
-                // If the timer meets or exceeds the connection delay:
                 if (attempt.timer >= connections[attempt.sender][attempt.receiver].delay_ms) {
-                    // Check if sending this transaction exceeds the sender's bandwidth limit.
                     if (transmitted[attempt.sender] + gpt.tx.size_kb > max_transmitted) {
-                        newAttempts.push_back(attempt); // Keep the attempt for later.
+                        newAttempts.push_back(attempt);
                         continue;
                     }
                     transmitted[attempt.sender] += gpt.tx.size_kb;
-                    // Mark the transaction as delivered to the receiver.
                     gpt.delivered_to.insert(attempt.receiver);
-                    // Update the receiver's known list.
                     known[attempt.receiver].push_back(gpt.tx);
-                    // Propagate: Create new delivery attempts from the receiver to each neighbor (except the sender)
-                    // that has not yet received the transaction.
                     for (const auto &nPair : connections[attempt.receiver]) {
                         int neighbor = nPair.first;
                         if (neighbor == attempt.sender)
@@ -348,7 +270,6 @@ public:
                         }
                     }
                 } else {
-                    // If not yet ready, keep this attempt.
                     newAttempts.push_back(attempt);
                 }
             }
@@ -364,8 +285,10 @@ public:
     // Publishing Functions
     //////////////////////////
     
-    // prepare_request: Chooses a random validator and uses its known transactions as the proposed set.
-    void prepare_request() {
+    // Updated prepare_request: now takes maximum_transaction and maximum_block_size as parameters.
+    // It shuffles the chosen validator’s known transactions and builds the proposed block
+    // by adding transactions until either limit is reached.
+    void prepare_request(int maximum_transaction, int maximum_block_size) {
         std::vector<int> validator_ids;
         for (const auto &p : isValidator)
             if (p.second)
@@ -374,16 +297,34 @@ public:
             std::print("No validators available for prepare_request.\n");
             return;
         }
+        
         std::random_device rd;
         std::mt19937 gen(rd());
         std::uniform_int_distribution<int> dis(0, validator_ids.size()-1);
         int chosen_validator = validator_ids[dis(gen)];
-        proposed_transactions = known[chosen_validator];
-        std::print("Prepared request from validator {} with {} transactions.\n", chosen_validator, proposed_transactions.size());
+        
+        // Shuffle the known transactions of the chosen validator.
+        std::vector<Transaction> shuffled_txs = known[chosen_validator];
+        std::shuffle(shuffled_txs.begin(), shuffled_txs.end(), gen);
+        
+        // Build the proposed block until limits are reached.
+        std::vector<Transaction> selected;
+        int current_block_size = 0;
+        for (const auto &tx : shuffled_txs) {
+            if (selected.size() >= static_cast<size_t>(maximum_transaction))
+                break;
+            if (current_block_size + tx.size_kb > maximum_block_size)
+                break;
+            selected.push_back(tx);
+            current_block_size += tx.size_kb;
+        }
+        
+        proposed_transactions = selected;
+        std::print("Prepared request from validator {} with {} transactions (total block size: {} KB).\n",
+                   chosen_validator, proposed_transactions.size(), current_block_size);
     }
     
-    // print_publish_request_summary: Prints a detailed summary of the proposed transactions,
-    // showing what percentage of the proposed set each validator knows, and the overall average.
+    // Prints a detailed summary of the proposed transactions, showing validator coverage.
     void print_publish_request_summary(double threshold) const {
         if (proposed_transactions.empty()) {
             std::print("No proposed transactions available for summary.\n");
@@ -415,26 +356,22 @@ public:
         }
     }
     
-    // publish_proposed_transactions: Publishes proposed transactions if enough validators know them.
-    // If not, increments the publish_attempt_counter. If that counter exceeds blocktime, forced publishing
-    // is triggered, which penalizes simulated time (by adding 2*blocktime) and increments forced_publish_count.
-    // In every branch, if debug is true, the publish summary is printed.
+    // Publishes proposed transactions if enough validators know them.
+    // If not, increments a counter and triggers forced publishing when necessary.
     int publish_proposed_transactions(double threshold, int blocktime, int &simulated_time, int simulation_step_ms, int &forced_publish_count, bool debug = true) {
         if (debug)
-            print_publish_request_summary(threshold);  // Always print summary at the beginning.
+            print_publish_request_summary(threshold);
             
         if (proposed_transactions.empty()) {
             if (debug)
                 std::print("No proposed transactions to publish.\n");
             return 0;
         }
-        // Collect validator IDs.
         std::vector<int> validator_ids;
         for (const auto &p : isValidator)
             if (p.second)
                 validator_ids.push_back(p.first);
         int total_validators = validator_ids.size();
-        // Calculate f = floor((total_validators - 1) / 3) and required validators = 2f + 1.
         int f = (total_validators - 1) / 3;
         int required_validators = 2 * f + 1;
         if (required_validators < 1)
@@ -443,7 +380,6 @@ public:
         for (const auto &tx : proposed_transactions)
             proposed_ids.insert(tx.id);
         int count_validators_meeting = 0;
-        // For each validator, count how many proposed transactions it knows.
         for (int v : validator_ids) {
             const auto &kn = known.at(v);
             int count = 0;
@@ -451,34 +387,29 @@ public:
                 if (proposed_ids.find(tx.id) != proposed_ids.end())
                     count++;
             }
-            // Calculate percentage of proposed transactions known.
             double percentage = proposed_ids.empty() ? 0.0 : (count * 100.0 / proposed_ids.size());
             if (percentage >= threshold)
                 count_validators_meeting++;
         }
         
         if (count_validators_meeting < required_validators) {
-            // Not enough validators meet the threshold.
             publish_attempt_counter += simulation_step_ms;
             if (debug)
                 std::print("Publishing not allowed: only {} validators have >= {:.2f}% (required: {}).\n",
                            count_validators_meeting, threshold, required_validators);
             if (debug)
                 print_publish_request_summary(threshold);
-            // If the accumulated counter exceeds blocktime, trigger forced publishing.
             if (publish_attempt_counter >= blocktime) {
                 if (debug)
                     std::print("Forced publishing triggered ({} ms reached).\n", publish_attempt_counter);
-                forced_publish_count++;  // Increment forced publishing count.
-                simulated_time += 2 * blocktime; // Add penalty time.
+                forced_publish_count++;
+                simulated_time += 2 * blocktime;
                 int published_count = proposed_transactions.size();
-                // Remove published transactions from every peer's known list.
                 for (auto &entry : known) {
                     auto new_end = std::remove_if(entry.second.begin(), entry.second.end(),
                         [&](const Transaction &tx) { return proposed_ids.count(tx.id) > 0; });
                     entry.second.erase(new_end, entry.second.end());
                 }
-                // Remove published transactions from global_pending.
                 global_pending.erase(std::remove_if(global_pending.begin(), global_pending.end(),
                     [&](const GlobalPendingTx &gpt) { return proposed_ids.count(gpt.tx.id) > 0; }),
                     global_pending.end());
@@ -491,7 +422,6 @@ public:
             }
             return 0;
         }
-        // Normal publishing branch: enough validators know the transactions.
         publish_attempt_counter = 0;
         int published_count = proposed_transactions.size();
         for (auto &entry : known) {
@@ -515,47 +445,34 @@ public:
     // Experiment Loop
     //////////////////////////
     
-    // run_experiment: The main simulation loop.
-    // It repeatedly injects transactions, propagates them (broadcast),
-    // prepares a publish request, and attempts publishing.
-    // Progress is printed including:
-    //   - Total simulated time (in sec, including penalties),
-    //   - Official simulation time (without forced publish penalties),
-    //   - Total published transactions,
-    //   - Current TPS (rounded to an integer),
-    //   - Number of pending transactions,
-    //   - Forced publish count.
-    void run_experiment(int total_simulation_ms, int injection_count, int simulation_step_ms, double publish_threshold, int blocktime, double bandwidth_kb_per_ms) {
+    // The main simulation loop.
+    // Now accepts max_transactions and max_block_size, which are passed to prepare_request.
+    void run_experiment(int total_simulation_ms, int injection_count, int simulation_step_ms, double publish_threshold, int blocktime, double bandwidth_kb_per_ms, int max_transactions, int max_block_size) {
         std::print("Experiment is beginning...\n");
         clean_network_txs();
-        int simulated_time = 0;       // Total simulation time including forced publishing penalty.
-        int official_sim_time = 0;    // Official simulation time (without forced publishing penalty).
+        int simulated_time = 0;       // Total simulation time including forced publish penalties.
+        int official_sim_time = 0;    // Official simulation time (without penalties).
         int block_cycle_time = 0;
-        int forced_publish_count = 0; // Count of forced publishing events.
+        int forced_publish_count = 0;
         while (simulated_time < total_simulation_ms) {
             std::print("Pending transactions before injection: {}\n", get_pending_count());
-            // Simulate a block cycle.
-            while (block_cycle_time < blocktime && simulated_time < total_simulation_ms) {
-                int step = std::min(simulation_step_ms, blocktime - block_cycle_time);
+            while (block_cycle_time < (blocktime+publish_attempt_counter) && simulated_time < total_simulation_ms) {
+                int step = std::min(simulation_step_ms, (blocktime+publish_attempt_counter) - block_cycle_time);
                 inject_transactions(injection_count);
                 broadcast(step, bandwidth_kb_per_ms);
                 block_cycle_time += step;
                 simulated_time += step;
                 official_sim_time += step;
             }
-            // If no proposed transactions, prepare a publish request.
             if (proposed_transactions.empty()) {
-                prepare_request();
+                prepare_request(max_transactions, max_block_size);
             }
-            // Attempt to publish transactions.
             int published_now = publish_proposed_transactions(publish_threshold, blocktime, simulated_time, simulation_step_ms, forced_publish_count, true);
             if (published_now > 0) {
-                // Reset block cycle if publishing occurred.
                 block_cycle_time = 0;
             }
             double sim_sec = simulated_time / 1000.0;
             double off_sec = official_sim_time / 1000.0;
-            // Calculate current TPS (total published transactions / simulated time), rounded to integer.
             int current_tps = (sim_sec > 0) ? static_cast<int>(std::round(total_published_global / sim_sec)) : 0;
             std::print("Progress: {:.2f} sec simulated (official: {:.2f} sec), published {} txs, current TPS: {} txs/sec, pending {} txs, forced publish count: {}\n",
                        sim_sec, off_sec, total_published_global, current_tps, get_pending_count(), forced_publish_count);

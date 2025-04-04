@@ -64,7 +64,7 @@ struct GlobalPendingTx {
     std::vector<DeliveryAttempt> attempts; // Pending delivery attempts.
     std::set<int> delivered_to;      // Set of node IDs that already know the transaction.
     
-    GlobalPendingTx(const Transaction &t, int origin) : tx(t){
+    GlobalPendingTx(const Transaction &t, int origin) : tx(t) {
         delivered_to.insert(origin);  // Still using the origin to initialize known_by.
     }
 };
@@ -98,6 +98,18 @@ private:
     int total_injected = 0;        // Total number of transactions injected.
     int total_published_global = 0;  // Total number of transactions published.
     
+    // Private vector storing the IDs of validator nodes.
+    std::vector<int> validator_ids;
+    
+    // M: required number of validators (M = 2f+1, where f = (total_validators-1)/3)
+    int M = 0;
+    
+    // Current proposed block size (in KB) computed during prepare_request.
+    int current_proposed_block_size_kb = 0;
+    
+    // Total published size in KB (for MB per second calculation)
+    int total_published_size_kb = 0;
+    
 public:
     //////////////////////////
     // Public Methods
@@ -108,7 +120,8 @@ public:
         return total_injected - total_published_global;
     }
     
-    // Resets the network state by clearing transactions, known lists, and counters.
+    // Resets the network state by clearing transactions, known lists, counters, and the current proposed block size.
+    // total_published_size_kb is reset here because each experiment starts fresh.
     void clean_network_txs() {
         next_tx_id = 1;
         publish_attempt_counter = 0;
@@ -116,6 +129,8 @@ public:
         total_injected = 0;
         total_published_global = 0;
         global_pending.clear();
+        total_published_size_kb = 0;
+        current_proposed_block_size_kb = 0;
         for (auto &p : known)
             p.second.clear();
         std::print("Network transactions cleared. Next_tx_id reset to {}.\n", next_tx_id);
@@ -190,6 +205,7 @@ public:
     //////////////////////////
     
     // Randomly selects a subset of peers to act as validators.
+    // At the end, stores the validator IDs in a private variable and computes M.
     void select_validators(int num_validators) {
         std::vector<int> all_peers;
         for (const auto &p : connection_count)
@@ -197,6 +213,19 @@ public:
         std::shuffle(all_peers.begin(), all_peers.end(), std::mt19937{std::random_device{}()});
         for (int i = 0; i < num_validators && i < static_cast<int>(all_peers.size()); ++i)
             isValidator[all_peers[i]] = true;
+        
+        // Update private validator_ids.
+        validator_ids.clear();
+        for (const auto &p : isValidator) {
+            if (p.second)
+                validator_ids.push_back(p.first);
+        }
+        int total_validators = validator_ids.size();
+        int f = (total_validators - 1) / 3;
+        int required_validators = 2 * f + 1;
+        if (required_validators < 1)
+            required_validators = 1;
+        M = required_validators;
     }
     
     // Injects unique transactions at seed nodes (non-validators).
@@ -206,7 +235,7 @@ public:
         total_injected += num_transactions;
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<int> size_distribution(1, 5); // Transaction size between 1 and 10 KB.
+        std::uniform_int_distribution<int> size_distribution(1, 5); // Transaction size between 1 and 5 KB.
         std::vector<int> seed_peers;
         // Seed nodes: non-validator nodes.
         for (const auto &p : isValidator)
@@ -288,20 +317,21 @@ public:
     // Updated prepare_request: now takes maximum_transaction and maximum_block_size as parameters.
     // It shuffles the chosen validator’s known transactions and builds the proposed block
     // by adding transactions until either limit is reached.
+    // The computed block size is stored in current_proposed_block_size_kb.
     void prepare_request(int maximum_transaction, int maximum_block_size) {
-        std::vector<int> validator_ids;
+        std::vector<int> local_validator_ids;
         for (const auto &p : isValidator)
             if (p.second)
-                validator_ids.push_back(p.first);
-        if (validator_ids.empty()) {
+                local_validator_ids.push_back(p.first);
+        if (local_validator_ids.empty()) {
             std::print("No validators available for prepare_request.\n");
             return;
         }
         
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_int_distribution<int> dis(0, validator_ids.size()-1);
-        int chosen_validator = validator_ids[dis(gen)];
+        std::uniform_int_distribution<int> dis(0, local_validator_ids.size()-1);
+        int chosen_validator = local_validator_ids[dis(gen)];
         
         // Shuffle the known transactions of the chosen validator.
         std::vector<Transaction> shuffled_txs = known[chosen_validator];
@@ -320,6 +350,7 @@ public:
         }
         
         proposed_transactions = selected;
+        current_proposed_block_size_kb = current_block_size;
         std::print("Prepared request from validator {} with {} transactions (total block size: {} KB).\n",
                    chosen_validator, proposed_transactions.size(), current_block_size);
     }
@@ -367,15 +398,6 @@ public:
                 std::print("No proposed transactions to publish.\n");
             return 0;
         }
-        std::vector<int> validator_ids;
-        for (const auto &p : isValidator)
-            if (p.second)
-                validator_ids.push_back(p.first);
-        int total_validators = validator_ids.size();
-        int f = (total_validators - 1) / 3;
-        int required_validators = 2 * f + 1;
-        if (required_validators < 1)
-            required_validators = 1;
         std::set<int> proposed_ids;
         for (const auto &tx : proposed_transactions)
             proposed_ids.insert(tx.id);
@@ -392,11 +414,11 @@ public:
                 count_validators_meeting++;
         }
         
-        if (count_validators_meeting < required_validators) {
+        if (count_validators_meeting < M) {
             publish_attempt_counter += simulation_step_ms;
             if (debug)
                 std::print("Publishing not allowed: only {} validators have >= {:.2f}% (required: {}).\n",
-                           count_validators_meeting, threshold, required_validators);
+                           count_validators_meeting, threshold, M);
             if (debug)
                 print_publish_request_summary(threshold);
             if (publish_attempt_counter >= blocktime) {
@@ -405,6 +427,9 @@ public:
                 forced_publish_count++;
                 simulated_time += 2 * blocktime;
                 int published_count = proposed_transactions.size();
+                // Use the precomputed block size.
+                total_published_size_kb += current_proposed_block_size_kb;
+                // Clean published transactions from known and global_pending.
                 for (auto &entry : known) {
                     auto new_end = std::remove_if(entry.second.begin(), entry.second.end(),
                         [&](const Transaction &tx) { return proposed_ids.count(tx.id) > 0; });
@@ -416,6 +441,8 @@ public:
                 proposed_transactions.clear();
                 publish_attempt_counter = 0;
                 total_published_global += published_count;
+                // Reset current proposed block size.
+                current_proposed_block_size_kb = 0;
                 if (debug)
                     print_publish_request_summary(threshold);
                 return published_count;
@@ -424,6 +451,7 @@ public:
         }
         publish_attempt_counter = 0;
         int published_count = proposed_transactions.size();
+        total_published_size_kb += current_proposed_block_size_kb;
         for (auto &entry : known) {
             auto new_end = std::remove_if(entry.second.begin(), entry.second.end(),
                         [&](const Transaction &tx) { return proposed_ids.count(tx.id) > 0; });
@@ -436,6 +464,8 @@ public:
             std::print("Published {} transactions. Cleared them from all nodes.\n", published_count);
         proposed_transactions.clear();
         total_published_global += published_count;
+        // Reset current proposed block size.
+        current_proposed_block_size_kb = 0;
         if (debug)
             print_publish_request_summary(threshold);
         return published_count;
@@ -447,6 +477,7 @@ public:
     
     // The main simulation loop.
     // Now accepts max_transactions and max_block_size, which are passed to prepare_request.
+    // Also prints total Published MB and MB per Second, calculated from the total published block size.
     void run_experiment(int total_simulation_ms, int injection_count, int simulation_step_ms, double publish_threshold, int blocktime, double bandwidth_kb_per_ms, int max_transactions, int max_block_size) {
         std::print("Experiment is beginning...\n");
         clean_network_txs();
@@ -479,10 +510,14 @@ public:
         }
         double total_seconds = simulated_time / 1000.0;
         double tps = (total_seconds > 0) ? total_published_global / total_seconds : 0;
+        double published_MB = total_published_size_kb / 1024.0;
+        double MB_per_sec = (total_seconds > 0) ? published_MB / total_seconds : 0;
         std::print("\n--- Experiment Complete ---\n");
         std::print("Total simulated time: {} ms ({} sec)\n", simulated_time, total_seconds);
         std::print("Total published transactions: {}\n", total_published_global);
         std::print("Transactions per second (TPS): {:.2f}\n", tps);
+        std::print("Total Published MB: {:.2f}\n", published_MB);
+        std::print("MB per Second: {:.2f}\n", MB_per_sec);
     }
 };
 

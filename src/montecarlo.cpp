@@ -15,7 +15,7 @@ and simulation settings (blocktime, injection count, simulation step, etc.).
 */
 
 constexpr double PUBLISH_THRESHOLD = 95.0;   // Threshold (%) for publishing transactions.
-constexpr int BLOCKTIME = 3000;                // Blocktime in ms.
+constexpr int BLOCKTIME = 15000;                // Blocktime in ms.
 constexpr double BANDWIDTH_KB_PER_MS = 1000.0;   // Bandwidth per peer in KB/ms.
 constexpr int NUM_PEERS = 30;                  // Total number of peers.
 constexpr bool FULL_MESH = false;              // Whether the network is fully meshed.
@@ -24,12 +24,12 @@ constexpr int MAX_CONN = 12;                   // Maximum connections per peer.
 
 // Official simulation parameters.
 constexpr int TOTAL_SIMULATION_MS = 1800000;     // Total simulation duration (ms).
-constexpr int INJECTION_COUNT = 150000;          // Number of transactions injected each cycle.
+constexpr int INJECTION_COUNT = 200000;          // Number of transactions injected each cycle.
 constexpr int SIMULATION_STEP_MS = 1000;         // Simulation step time (ms).
 
 // New parameters for preparing publish requests.
-constexpr int MAX_TRANSACTIONS = 500000;   // Maximum number of transactions allowed.
-constexpr int MAX_BLOCK_SIZE = 1000000;   // Maximum block size in KB.
+constexpr int MAX_TRANSACTIONS = INJECTION_COUNT * 1.5 * BLOCKTIME / 1000;   // Maximum number of transactions allowed.
+constexpr int MAX_BLOCK_SIZE = MAX_TRANSACTIONS*3;   // Maximum block size in KB.
 
 int main() {
     Network network;

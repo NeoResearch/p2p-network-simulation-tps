@@ -6,6 +6,10 @@
 using std::print;
 using std::string;
 
+// Fixed seed configuration: set USE_FIXED_SEED to true for reproducible experiments.
+constexpr bool USE_FIXED_SEED = true;
+constexpr unsigned int FIXED_SEED = 12345;
+
 // Simulation network parameters.
 constexpr int NUM_PEERS = 30;          // Total number of peers.
 constexpr bool FULL_MESH = false;      // Whether network is fully meshed.
@@ -46,13 +50,14 @@ struct ExperimentParams {
 
 int main() {
     Network network;
+    if (USE_FIXED_SEED) {
+        network.set_fixed_seed(FIXED_SEED);
+    }
     
-    // Set up network configuration.
     network.generate_network(NUM_PEERS, FULL_MESH, MIN_CONN, MAX_CONN, DELAY_MIN, DELAY_MAX, DELAY_MULTIPLIER);
     network.select_validators(7); // Randomly select 7 validators.
     network.set_tx_size_config(TX_SIZE_MIN, TX_SIZE_MAX);
     
-    // Create a vector of experiment parameter sets.
     std::vector<ExperimentParams> experiments;
     experiments.push_back(ExperimentParams{
         TOTAL_SIMULATION_MS,
@@ -75,20 +80,19 @@ int main() {
         MAX_BLOCK_SIZE / 2
     });
     
-    // Open output file.
     std::ofstream outfile("experiment_results.txt");
-    if (!outfile) {
+    if (!outfile)
+    {
         print("Error opening output file.\n");
         return 1;
     }
     
-    // Write header.
     outfile << "Experiment_ID, NUM_PEERS, FULL_MESH, MIN_CONN, MAX_CONN, DELAY_MIN, DELAY_MAX, DELAY_MULTIPLIER, "
             << "TOTAL_SIMULATION_MS, INJECTION_COUNT, SIMULATION_STEP_MS, PUBLISH_THRESHOLD, BLOCKTIME, BANDWIDTH_KB_PER_MS, "
             << "MAX_TRANSACTIONS, MAX_BLOCK_SIZE, TOTAL_PUBLISHED_GLOBAL, TPS, PUBLISHED_MB, MB_PER_SEC, FORCED_PUBLISH_COUNT, FINAL_PENDING_COUNT\n";
     
-    // Run experiments.
-    for (size_t i = 0; i < experiments.size(); i++) {
+    for (size_t i = 0; i < experiments.size(); i++)
+    {
         const auto &exp = experiments[i];
         std::print("--------------------------------------------------\n");
         std::print("Running experiment {}:\n", i + 1);

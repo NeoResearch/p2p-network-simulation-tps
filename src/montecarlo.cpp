@@ -22,9 +22,9 @@ constexpr int DELAY_MAX = 500;         // Maximum delay.
 constexpr int DELAY_MULTIPLIER = 1;    // Delay multiplier.
 
 // Simulation parameters.
-constexpr int TOTAL_SIMULATION_MS = 60 * 1000; // Total simulation time in ms.
-constexpr int INJECTION_COUNT = 200000;        // Number of transactions injected per cycle.
+constexpr int TOTAL_SIMULATION_MS = 60 * 1000; // Total simulation time in ms (current 60s).
 constexpr int SIMULATION_STEP_MS = 1000;         // Simulation step in ms.
+constexpr int INJECTION_COUNT = 200000 * SIMULATION_STEP_MS / 1000;        // Number of transactions injected per cycle.
 constexpr double PUBLISH_THRESHOLD = 95.0;       // Publish threshold in %.
 constexpr int BLOCKTIME = 15000;               // Blocktime in ms.
 constexpr double BANDWIDTH_KB_PER_MS = 1000.0;   // Bandwidth per peer.
